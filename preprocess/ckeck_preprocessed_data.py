@@ -1,11 +1,17 @@
 import torch
 
-path = "/home/danielamrhein/master_thesis/preprocess/preprocessed_data/processed_04_session1_0.pkl_ekf.pt"
+path = "/home/danielamrhein/master_thesis/UIP_dataset/UIP_DB_Dataset/test.pt"
 data = torch.load(path, map_location=torch.device("cpu"))
 
-print("Keys in preprocessed data:", data.keys())
-print("acc_world shape:", data["acc_world"].shape)  # (T, S
-print("vel shape:", data["vel"].shape)              # (T, S, 3)
-print("pos shape:", data["pos"].shape)              # (T, S,
-print("quat shape:", data["quat"].shape)            # (T, S, 4)
-print("vuwb shape:", data["vuwb"].shape)            # (T, P)
+acc_list = data["acc"]
+ori_list = data["ori"]
+vuwb_list = data["vuwb"]
+
+print("Type acc:", type(acc_list), "Length acc list:", len(acc_list))
+print("Type ori:", type(ori_list), "Length ori list:", len(ori_list))
+print("Type vuwb:", type(vuwb_list), "Length vuwb list:", len(vuwb_list))
+
+# Peek at the first sequence
+print("First acc sequence shape:", torch.tensor(acc_list[0]).shape)
+print("First ori sequence shape:", torch.tensor(ori_list[0]).shape)
+print("First vuwb sequence shape:", torch.tensor(vuwb_list[0]).shape)

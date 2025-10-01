@@ -28,37 +28,34 @@ def prepare_data_and_calibration(
     device
 ):
     """
-    Handles all pre-processing and calibration steps, correctly accounting for gravity.
+    Handles all pre-processing and calibration, with a focus on a high-confidence
+    initial state from the static T-pose.
     """
     print("\n--- Preparing Ground Truth and Calibration Data ---")
     
-    # ... (Unpack constants are the same) ...
     POSE_KEY, TRAN_KEY = constants['POSE_KEY'], constants['TRAN_KEY']
     SEQUENCE_INDEX = constants['SEQUENCE_INDEX']
     PELVIS_IDX, WRIST_IDX = constants['PELVIS_IDX'], constants['WRIST_IDX']
     WRIST_JOINT_IDX = constants['WRIST_JOINT_IDX']
     num_frames = acc_local_seq.shape[0]
 
-    print("Calibrating IMU accelerometer bias from T-pose (gravity-free data)...")
+    print("Calibrating IMU accelerometer bias from T-pose...")
     calibration_frames = 100
     initial_bias_p = acc_local_seq[:calibration_frames, PELVIS_IDX].mean(dim=0)
     initial_bias_w = acc_local_seq[:calibration_frames, WRIST_IDX].mean(dim=0)
-    print("Calibration complete.")
+    print("IMU bias calibration complete.")
 
-    # --- Ground Truth Calculation (Memory-Efficiently) ---
     print("Pre-calculating ground truth joints...")
     smpl_layer_cpu = SMPLLayer(model_type="smpl", gender="male", device='cpu')
     gt_poses_all_cpu = original_data[POSE_KEY][SEQUENCE_INDEX].cpu()
     gt_trans_cpu = original_data[TRAN_KEY][SEQUENCE_INDEX].cpu()
     
+    betas_cpu = torch.zeros(1, 10)
     if 'betas' in original_data and original_data['betas'].shape[0] > SEQUENCE_INDEX:
         betas_cpu = original_data['betas'][SEQUENCE_INDEX].cpu().view(1, -1)
-    else: # Fallback for older datasets
-        betas_cpu = torch.zeros(1, 10)
 
     _, first_frame_joints = smpl_layer_cpu(poses_body=gt_poses_all_cpu[0:1, 1:, :].flatten(start_dim=1), poses_root=gt_poses_all_cpu[0:1, 0, :], trans=gt_trans_cpu[0:1], betas=betas_cpu)
-    num_joints_from_model = first_frame_joints.shape[1]
-    gt_joints_all_frames_cpu = torch.zeros(num_frames, num_joints_from_model, 3)
+    gt_joints_all_frames_cpu = torch.zeros(num_frames, first_frame_joints.shape[1], 3)
     
     for t in range(num_frames):
         _, gt_joints_frame = smpl_layer_cpu(poses_body=gt_poses_all_cpu[t:t+1, 1:, :].flatten(start_dim=1), poses_root=gt_poses_all_cpu[t:t+1, 0, :], trans=gt_trans_cpu[t:t+1], betas=betas_cpu)
@@ -68,14 +65,26 @@ def prepare_data_and_calibration(
     gt_wrist_path_full = gt_joints_all_frames[:, WRIST_JOINT_IDX, :]
     gt_pelvis_path_full = gt_joints_all_frames[:, 0, :]
     
-    # --- Offline UWB Bias Calibration ---
-    print("Performing offline UWB bias calibration...")
-    uwb_gt_dists_for_calib = torch.linalg.norm(gt_wrist_path_full - gt_pelvis_path_full, dim=1)
-    uwb_raw_dists_for_calib = uwb_dist_matrix[:, PELVIS_IDX, WRIST_IDX]
-    uwb_offset = (uwb_raw_dists_for_calib - uwb_gt_dists_for_calib).mean().item()
-    print(f"Calculated static UWB offset: {uwb_offset:.4f} meters")
+    print("Performing high-confidence UWB bias calibration from static pose...")
+    uwb_gt_dists_static = torch.linalg.norm(gt_wrist_path_full[:calibration_frames] - gt_pelvis_path_full[:calibration_frames], dim=1).mean()
+    uwb_raw_dists_static = uwb_dist_matrix[:calibration_frames, PELVIS_IDX, WRIST_IDX].mean()
+    initial_uwb_bias = (uwb_raw_dists_static - uwb_gt_dists_static).item()
+    print(f"Calculated INITIAL UWB Bias from T-pose: {initial_uwb_bias:.4f} meters")
 
-    calibration_data = {"initial_bias_p": initial_bias_p, "initial_bias_w": initial_bias_w, "gt_joints_all_frames": gt_joints_all_frames, "gt_wrist_path_full": gt_wrist_path_full, "gt_pelvis_path_full": gt_pelvis_path_full, "uwb_offset": uwb_offset}
+    # Calculate global average offset for plotting comparison only
+    uwb_gt_dists_all = torch.linalg.norm(gt_wrist_path_full - gt_pelvis_path_full, dim=1)
+    uwb_raw_dists_all = uwb_dist_matrix[:, PELVIS_IDX, WRIST_IDX]
+    global_uwb_offset = (uwb_raw_dists_all - uwb_gt_dists_all).mean().item()
+
+    calibration_data = {
+        "initial_bias_p": initial_bias_p, 
+        "initial_bias_w": initial_bias_w,
+        "initial_uwb_bias": initial_uwb_bias,
+        "gt_joints_all_frames": gt_joints_all_frames, 
+        "gt_wrist_path_full": gt_wrist_path_full, 
+        "gt_pelvis_path_full": gt_pelvis_path_full, 
+        "uwb_offset": global_uwb_offset
+    }
     return calibration_data
 
 def smooth_data(data, cutoff=1.0, fs=100.0, order=2):
@@ -95,66 +104,77 @@ def smooth_data(data, cutoff=1.0, fs=100.0, order=2):
         for i in range(data_np.shape[1]):
             smoothed_data[:, i] = filtfilt(b, a, data_np[:, i])
             
-    return torch.from_numpy(smoothed_data).float().to(data.device if isinstance(data, torch.Tensor) else 'cpu')
+    return torch.from_numpy(smoothed_data.copy()).float().to(data.device if isinstance(data, torch.Tensor) else 'cpu')
 
 # In main_ekf.py
 
 def run_ekf_pipeline(acc_seq, ori_seq, uwb_dists, initial_state, gt_wrist_path, use_offline_calibration=True, static_uwb_offset=0.0, device='cpu'):
-    """Runs the full EKF pipeline and returns the estimated states and errors."""
+    """
+    Runs the full EKF pipeline using a two-stage tuning approach for robust initialization.
+    It no longer subtracts the static UWB offset, relying solely on the EKF's internal bias state.
+    """
     print(f"\n--- Running EKF Pipeline (Calibration: {use_offline_calibration}) ---")
-
-    print("DEBUG: Received initial biases in dictionary:")
-    print(f"  b_p_init: {initial_state['b_p_init'].cpu().numpy().flatten()}")
-    print(f"  b_w_init: {initial_state['b_w_init'].cpu().numpy().flatten()}")
     
     ekf = EKF(device=device)
     ekf.set_initial(**initial_state)
 
-    offset_to_use = static_uwb_offset if use_offline_calibration==True else 0.0
-
     num_frames = acc_seq.shape[0]
     all_est_states, ekf_wrist_errors, predicted_dists = [], [], []
-    
-    # Add a list to store corrected acceleration
     corrected_acc_w_history = []
 
+    # --- Two-Stage Tuning Parameters ---
+    WARMUP_FRAMES = 250
+    # Stage 1: "Calm" tuning for the warm-up phase (prevents "whiplash")
+    Q_uwb_warmup = 1e-4  # Assume bias changes slowly at first
+    R_uwb_warmup = 0.6**2  # Be skeptical of initial noisy measurements
+    # Stage 2: "Aggressive" tuning for dynamic tracking
+    Q_uwb_dynamic = 0.1    # Assume bias can change rapidly
+    R_uwb_dynamic = 0.3**2 # Trust the measurements more after settling
+
     for t in range(num_frames):
-        if t < 20:
-        # Temporarily increase uncertainty in the motion model
-            ekf.P *= 1.1 
+        # --- Implement the two-stage tuning ---
+        if t < WARMUP_FRAMES:
+            ekf.Q[18, 18] = Q_uwb_warmup
+            ekf.R_dist_base = torch.eye(1, device=device, dtype=torch.float32) * R_uwb_warmup
+        elif t == WARMUP_FRAMES: # Switch to dynamic tuning once
+            print(f"Switching to dynamic EKF tuning at frame {t}.")
+            ekf.Q[18, 18] = Q_uwb_dynamic
+            ekf.R_dist_base = torch.eye(1, device=device, dtype=torch.float32) * R_uwb_dynamic
 
         acc_p_local, acc_w_local = acc_seq[t, PELVIS_IDX], acc_seq[t, WRIST_IDX]
         R_p, R_w = ori_seq[t, PELVIS_IDX], ori_seq[t, WRIST_IDX]
         
-        # The predict function returns the corrected local acceleration for the wrist
         _, acc_w_local_corr = ekf.predict(acc_p_local, R_p, acc_w_local, R_w)
-        
-        # NEW: Store the corrected acceleration
         corrected_acc_w_history.append(acc_w_local_corr.clone())
         
+        # --- FIX: Use the raw UWB measurement directly ---
+        # The EKF's internal bias state `b_uwb` is now solely responsible for the correction.
         dist_meas_raw = uwb_dists[t, PELVIS_IDX, WRIST_IDX].item()
-        dist_meas_for_ekf = dist_meas_raw - offset_to_use
         
         pred_dist = 0.0
-        if 0.0 < dist_meas_for_ekf < 1.5: 
-            pred_dist = ekf.update_uwb_scalar_distance(dist_meas_for_ekf)
+        if 0.0 < dist_meas_raw < 2.0: # Increased range for robustness
+            pred_dist = ekf.update_uwb_scalar_distance(dist_meas_raw)
 
+        # Pelvis updates (with conditional damping)
         ekf.update_zero_velocity_pelvis(acc_p_local)
-        ekf.update_velocity_damping_pelvis()
+        if len(ekf.acc_p_buffer) == ekf.buffer_size and torch.var(torch.stack(ekf.acc_p_buffer), dim=0).mean() < (ekf.zvu_threshold * 1.5):
+            ekf.update_velocity_damping_pelvis()
 
-        ekf.update_zero_velocity_wrist(acc_w_local)
+        # Wrist updates (with conditional damping)
+        wrist_acc_var = ekf.update_zero_velocity_wrist(acc_w_local) 
+        if wrist_acc_var < (ekf.zvu_threshold * 1.5):
+            pass
         ekf.update_velocity_damping_wrist()
-        
+            
         state, _ = ekf.get_state()
         all_est_states.append(state.clone())
         
-        current_est_wrist_pos = state[12:15].squeeze()
+        current_est_wrist_pos = state[9:12].squeeze()
         error = torch.linalg.norm(current_est_wrist_pos - gt_wrist_path[t]).item()
         ekf_wrist_errors.append(error)
         predicted_dists.append(pred_dist)
         
     print("EKF pipeline complete.")
-    # NEW: Add the corrected acceleration history to the return values
     return torch.stack(all_est_states), ekf_wrist_errors, predicted_dists, torch.stack(corrected_acc_w_history)
 
 def post_process_and_solve_ik(cal_states, gt_poses_all, gt_trans, gt_joints_all_frames, gt_pelvis_path_full, ori_matrix_seq, constants, device):

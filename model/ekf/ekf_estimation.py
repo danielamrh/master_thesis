@@ -41,7 +41,7 @@ class EKF:
         self.Q = torch.diag(Q_diag)
 
         # Measurement Noise Covariance (R)
-        self.R_dist_base = torch.eye(1, device=device, dtype=dtype) * 1.0**2
+        self.R_dist_base = torch.eye(1, device=device, dtype=dtype) * 0.4**2
         self.R_zvu = torch.eye(3, device=device, dtype=dtype) * 0.02**2
 
         self.acc_p_buffer = []
@@ -158,17 +158,21 @@ class EKF:
         self.acc_w_buffer.append(acc_w_local)
         if len(self.acc_w_buffer) > self.buffer_size: self.acc_w_buffer.pop(0)
 
+        acc_variance = torch.inf # Default to high variance (moving)
         if len(self.acc_w_buffer) == self.buffer_size:
             acc_variance = torch.var(torch.stack(self.acc_w_buffer), dim=0).mean()
-            if acc_variance > self.zvu_threshold: return 
             
-            y = torch.zeros(3, 1, device=self.device, dtype=self.dtype)
-            h = self.x[12:15] # INDEXING UPDATE
-            H = torch.zeros((3, self.state_dim), device=self.device, dtype=self.dtype)
-            H[:, 12:15] = torch.eye(3) # INDEXING UPDATE
-            S = H @ self.P @ H.T + self.R_zvu
-            K = self.P @ H.T @ torch.linalg.pinv(S)
-            self.update(y, h, H, self.R_zvu, K)
+            # If variance is low enough, perform a Zero-Velocity Update
+            if acc_variance < self.zvu_threshold:
+                y = torch.zeros(3, 1, device=self.device, dtype=self.dtype)
+                h = self.x[12:15]
+                H = torch.zeros((3, self.state_dim), device=self.device, dtype=self.dtype)
+                H[:, 12:15] = torch.eye(3)
+                S = H @ self.P @ H.T + self.R_zvu
+                K = self.P @ H.T @ torch.linalg.pinv(S)
+                self.update(y, h, H, self.R_zvu, K)
+    
+        return acc_variance 
 
     def update_velocity_damping_wrist(self):
         y = torch.zeros(3, 1, device=self.device, dtype=self.dtype)
@@ -180,7 +184,6 @@ class EKF:
         K = self.P @ H.T @ torch.linalg.pinv(S)
         self.update(y, h, H, R_damping, K)
 
-    # Pelvis update functions are also included for completeness
     def update_zero_velocity_pelvis(self, acc_p_local: torch.Tensor):
         self.acc_p_buffer.append(acc_p_local) 
         if len(self.acc_p_buffer) > self.buffer_size: self.acc_p_buffer.pop(0)
@@ -206,6 +209,31 @@ class EKF:
         S = H @ self.P @ H.T + R_damping
         K = self.P @ H.T @ torch.linalg.pinv(S)
         self.update(y, h, H, R_damping, K)
+
+    def update_kinematic_anchor(self, p_p_est, p_w_est, max_dist=0.75, strength=0.5):
+        """
+        Applies a soft constraint to keep the wrist within a plausible distance of the pelvis.
+        This acts as a "sanity check" to prevent divergence during initialization.
+        """
+        diff_vec = p_w_est - p_p_est
+        dist = torch.linalg.norm(diff_vec)
+
+        if dist > max_dist:
+            # The measurement 'y' is the desired maximum distance.
+            y = torch.tensor([[max_dist]], device=self.device, dtype=self.dtype)
+            # The current state 'h' is the measured distance.
+            h = dist.view(1, 1)
+
+            H = torch.zeros((1, self.state_dim), device=self.device, dtype=self.dtype)
+            H[0, 0:3] = -diff_vec / dist
+            H[0, 9:12] = diff_vec / dist
+
+            # R represents our confidence in this constraint. A lower value means more confidence.
+            R_anchor = torch.eye(1, device=self.device, dtype=self.dtype) * (strength**2)
+            
+            S = H @ self.P @ H.T + R_anchor
+            K = self.P @ H.T @ torch.linalg.pinv(S)
+            self.update(y, h, H, R_anchor, K)
 
     def get_state(self):
         return self.x.clone(), self.P.clone()
