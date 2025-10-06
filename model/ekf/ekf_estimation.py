@@ -17,7 +17,7 @@ class EKF:
         self.x = torch.zeros(self.state_dim, 1, device=device, dtype=dtype)
         self.P = torch.eye(self.state_dim, device=device, dtype=dtype) * 0.1
 
-        # --- NEW TUNING: A less aggressive, smoother baseline ---
+        # --- TUNING Parameters ---
         p_noise = 1e-5     # Lower position uncertainty from model
         v_noise = 1e-3     # Lower velocity uncertainty for smoother integration
         b_noise = 2e-5     # Allow bias to adapt, but not erratically
@@ -33,8 +33,6 @@ class EKF:
         self.Q_base = torch.diag(Q_diag)
         self.Q = self.Q_base.clone()
 
-        # --- NEW TUNING: Increased R to be more skeptical of UWB noise ---
-        # This is a key parameter for reducing jitter.
         self.R_dist_base = torch.eye(1, device=device, dtype=dtype) * 0.15**2 
         self.R_zvu = torch.eye(3, device=device, dtype=dtype) * (0.01**2)
 
