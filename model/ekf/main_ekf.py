@@ -524,14 +524,14 @@ if __name__ == "__main__":
     # SMPL ground truth (e.g., Z-up). This rotation aligns the IMU orientation
     # data to match the SMPL coordinate system. This is a common pre-processing step.
     # NOTE: This does NOT interact with gravity, as gravity is assumed to be pre-removed.
-    align_angle = -np.pi / 2.0
-    R_align = torch.tensor([
-        [1.0, 0.0, 0.0],
-        [0.0, np.cos(align_angle), -np.sin(align_angle)],
-        [0.0, np.sin(align_angle), np.cos(align_angle)]
-    ], dtype=torch.float32, device=DEVICE)
-    ori_matrix_seq = R_align.unsqueeze(0).unsqueeze(0) @ ori_matrix_seq
-    print("Applied coordinate system alignment to IMU orientations.")
+    # align_angle = -np.pi / 2.0
+    # R_align = torch.tensor([
+    #     [1.0, 0.0, 0.0],
+    #     [0.0, np.cos(align_angle), -np.sin(align_angle)],
+    #     [0.0, np.sin(align_angle), np.cos(align_angle)]
+    # ], dtype=torch.float32, device=DEVICE)
+    # ori_matrix_seq = R_align.unsqueeze(0).unsqueeze(0) @ ori_matrix_seq
+    # print("Applied coordinate system alignment to IMU orientations.")
 
     # --- Pack constants for cleaner function calls ---
     constants = {

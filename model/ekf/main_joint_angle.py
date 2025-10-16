@@ -2,7 +2,7 @@ import torch
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.spatial.transform import Rotation as R
+
 from ekf_joint_angle import EKFJointAngle # Make sure this is the new 4-state version
 
 from aitviewer.configuration import CONFIG as C
@@ -10,36 +10,16 @@ from aitviewer.viewer import Viewer
 from aitviewer.renderables.smpl import SMPLLayer, SMPLSequence
 
 from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import RANSACRegressor
+
+from scipy.spatial.transform import Rotation as R
+from scipy.signal import medfilt
+from scipy.stats import pearsonr
+from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter1d
 
 C.window_type = "pyqt5"
 
-# In main_joint_angle.py, update this function
-
-def plot_joint_angle_results(est_angles, gt_angles):
-    print("\nPlotting joint angle results...")
-    fig, axs = plt.subplots(3, 1, figsize=(20, 10), sharex=True)
-    fig.suptitle('EKF Joint Angle Estimation vs. Ground Truth (7-State)', fontsize=16)
-    
-    # est_angles is now Nx3: [sh_pitch, sh_roll, el_pitch]
-    
-    # Shoulder Pitch
-    axs[0].plot(np.rad2deg(gt_angles['sh_pitch']), label='GT Pitch', color='g')
-    axs[0].plot(np.rad2deg(est_angles[:, 0]), label='EKF Pitch', color='b', linestyle='--')
-    axs[0].set_title("Shoulder Pitch Angle"); axs[0].set_ylabel("Angle (degrees)"); axs[0].grid(True); axs[0].legend()
-
-    # --- FIX: UNWRAP THE SHOULDER ROLL ANGLE FOR PLOTTING ---
-    unwrapped_roll = np.unwrap(est_angles[:, 1])
-    axs[1].plot(np.rad2deg(gt_angles['sh_roll']), label='GT Roll', color='g')
-    axs[1].plot(np.rad2deg(unwrapped_roll), label='EKF Roll (Unwrapped)', color='b', linestyle='--')
-    # --- END FIX ---
-    axs[1].set_title("Shoulder Roll Angle"); axs[1].set_ylabel("Angle (degrees)"); axs[1].grid(True); axs[1].legend()
-
-    # Elbow Pitch
-    axs[2].plot(np.rad2deg(gt_angles['el_pitch']), label='GT Pitch', color='g')
-    axs[2].plot(np.rad2deg(est_angles[:, 2]), label='EKF Pitch', color='b', linestyle='--')
-    axs[2].set_title("Elbow Pitch Angle"); axs[2].set_xlabel("Frame"); axs[2].set_ylabel("Angle (degrees)"); axs[2].grid(True); axs[2].legend()
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.show()
 
 def calibrate_uwb_from_t_pose(uwb_dist_matrix, gt_kinematics, constants):
     """
@@ -64,10 +44,9 @@ def calibrate_uwb_from_t_pose(uwb_dist_matrix, gt_kinematics, constants):
     print(f"  > Calculated UWB Bias Offset:   {uwb_offset:.4f} m")
     return uwb_offset
 
-# In main_joint_angle.py
 def get_ground_truth_kinematics(original_data, constants, device):
     """
-    Computes GT joint positions, angles, and bone lengths from SMPL data.
+    Computes GT joint positions, anatomical angles, and bone lengths from SMPL data.
     """
     print("--- Pre-calculating Ground Truth Kinematics ---")
     POSE_KEY, TRAN_KEY = constants['POSE_KEY'], constants['TRAN_KEY']
@@ -83,7 +62,7 @@ def get_ground_truth_kinematics(original_data, constants, device):
     else:
         betas = torch.zeros(1, 10, device=device)
 
-    # Get joint positions (unchanged)
+    # Get joint positions
     _, first_frame_joints = smpl_layer(poses_body=gt_poses_all[0:1, 1:].flatten(start_dim=1), poses_root=gt_poses_all[0:1, 0], trans=gt_trans[0:1], betas=betas)
     gt_joints_all_frames = torch.zeros(num_frames, first_frame_joints.shape[1], 3, device=device)
     with torch.no_grad():
@@ -91,7 +70,7 @@ def get_ground_truth_kinematics(original_data, constants, device):
             _, gt_joints_frame = smpl_layer(poses_body=gt_poses_all[t:t+1, 1:].flatten(start_dim=1), poses_root=gt_poses_all[t:t+1, 0], trans=gt_trans[t:t+1], betas=betas)
             gt_joints_all_frames[t] = gt_joints_frame.squeeze(0)
 
-    # Get bone lengths (unchanged)
+    # Get bone lengths
     p_shldr_t0 = gt_joints_all_frames[0, constants['SHLDR_JOINT_IDX']]
     p_elbow_t0 = gt_joints_all_frames[0, constants['ELBOW_JOINT_IDX']]
     p_wrist_t0 = gt_joints_all_frames[0, constants['WRIST_JOINT_IDX']]
@@ -99,29 +78,31 @@ def get_ground_truth_kinematics(original_data, constants, device):
     forearm_length = torch.linalg.norm(p_wrist_t0 - p_elbow_t0).item()
     print(f"  > Upper arm length: {upper_arm_length:.4f} m, Forearm length: {forearm_length:.4f} m")
 
-    # --- FIX: CORRECTLY CONVERT AXIS-ANGLE TO EULER ANGLES ---
+    # --- CORRECTLY CONVERT AXIS-ANGLE TO ANATOMICAL EULER ANGLES ---
     gt_shoulder_aa = gt_poses_all[:, 1 + constants['SHLDR_POSE_IDX'], :].cpu().numpy()
     gt_elbow_aa = gt_poses_all[:, 1 + constants['ELBOW_POSE_IDX'], :].cpu().numpy()
 
-    # Convert axis-angle to rotation matrices, then to our EKF's 'yxz' Euler convention
-    # Note: We use 'yxz' order: Roll (y), Pitch (x), Twist (z). We only care about the first two.
-    gt_shoulder_euler = R.from_rotvec(gt_shoulder_aa).as_euler('yxz')
-    gt_elbow_euler = R.from_rotvec(gt_elbow_aa).as_euler('yxz')
+    gt_shoulder_euler = R.from_rotvec(gt_shoulder_aa).as_euler('zxy')
+    gt_elbow_euler = R.from_rotvec(gt_elbow_aa).as_euler('zxy') 
     
+    # --- PERMANENT FIX: SWAP THE ANGLE ASSIGNMENTS ---
+    # EKF State 0 will be Abduction, State 1 will be Flexion.
     gt_angles_for_plotting = {
-        'sh_pitch': gt_shoulder_euler[:, 1], # Pitch is the second angle (around x)
-        'sh_roll': gt_shoulder_euler[:, 0],  # Roll is the first angle (around y)
-        'el_pitch': gt_elbow_euler[:, 1]     # Elbow pitch is around x
+        'sh_abduction': gt_shoulder_euler[:, 0], # Abduction is the Z component (first)
+        'sh_flexion':   gt_shoulder_euler[:, 1], # Flexion is the X component (second)
+        'el_flexion':   gt_elbow_euler[:, 1]
     }
     # --- END FIX ---
 
     kinematics = {
-        "joints": gt_joints_all_frames, "bone_lengths": [upper_arm_length, forearm_length],
-        "gt_angles": gt_angles_for_plotting, "poses": gt_poses_all, "trans": gt_trans, "betas": betas
+        "joints": gt_joints_all_frames, 
+        "bone_lengths": [upper_arm_length, forearm_length],
+        "gt_angles": gt_angles_for_plotting, 
+        "poses": gt_poses_all, 
+        "trans": gt_trans, 
+        "betas": betas
     }
     return kinematics
-
-# In main_joint_angle.py, replace the run_ekf_joint_angle_pipeline function
 
 def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, uwb_offset=0.0):
     print("\n--- Running EKF Pipeline with Initial T-Pose Calibration ---")
@@ -181,38 +162,79 @@ def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, 
     print("EKF pipeline complete.")
     return np.array(estimated_angles_history)
 
-def calibrate_and_correct_angles(est_angles, gt_angles, calib_frames=2000):
-    print(f"\n--- Applying Final Calibration using first {calib_frames} frames ---")
+def calibrate_and_correct_angles(est_angles, gt_angles):
+    """
+    Learns a ROBUST linear correction model (y = mx + c) using RANSAC
+    to fix bias and scaling errors while ignoring outliers.
+    """
+    print(f"\n--- Applying Calibration using RANSAC ---")
+    
     est_angles_np_deg = np.rad2deg(est_angles)
     corrected_angles_deg = np.zeros_like(est_angles_np_deg)
-    angle_keys = ['sh_pitch', 'sh_roll', 'el_pitch']
-    gt_angle_data = [gt_angles['sh_pitch'], gt_angles['sh_roll'], gt_angles['el_pitch']]
+    
+    kernel_size = 21
+    est_angles_np_deg[:, 0] = np.rad2deg(np.unwrap(est_angles[:, 0]))
+    est_angles_np_deg[:, 1] = np.rad2deg(np.unwrap(est_angles[:, 1]))
+    est_angles_np_deg[:, 2] = np.rad2deg(np.unwrap(est_angles[:, 2]))
+
+    # est_angles_np_deg[:, 0] = savgol_filter(est_angles_np_deg[:, 0], window_length=21, polyorder=3)
+    # est_angles_np_deg[:, 1] = savgol_filter(est_angles_np_deg[:, 1], window_length=21, polyorder=3)
+    # est_angles_np_deg[:, 2] = savgol_filter(est_angles_np_deg[:, 2], window_length=21, polyorder=3) 
+
+    # est_angles_np_deg[:,0] = gaussian_filter1d(est_angles_np_deg[:, 0], sigma=3)
+    # est_angles_np_deg[:, 1] = gaussian_filter1d(est_angles_np_deg[:, 1], sigma=3)
+    # est_angles_np_deg[:, 2] = gaussian_filter1d(est_angles_np_deg[:, 2], sigma=3)
+
+    # est_angles_np_deg[:, 0] = medfilt(est_angles_np_deg[:, 0], kernel_size=kernel_size)
+    # est_angles_np_deg[:, 1] = medfilt(est_angles_np_deg[:, 1], kernel_size=kernel_size)
+    # est_angles_np_deg[:, 2] = medfilt(est_angles_np_deg[:, 2], kernel_size=kernel_size)
+    
+    angle_keys = ['sh_abduction', 'sh_flexion', 'el_flexion']
+    titles = ["Shoulder Abduction/Adduction", "Shoulder Flexion/Extension", "Elbow Flexion/Extension"]
+
+    gt_angle_data = [gt_angles[key] for key in angle_keys]
 
     for i, key in enumerate(angle_keys):
-        model = LinearRegression()
-        train_x = est_angles_np_deg[:calib_frames, i].reshape(-1, 1)
-        train_y = np.rad2deg(gt_angle_data[i][:calib_frames])
-        model.fit(train_x, train_y)
-        print(f"  > {key.replace('_', ' ').title():<25} Correction: GT = {model.coef_[0]:.2f} * EKF + {model.intercept_:.2f}")
+        model = RANSACRegressor()
+        
+        train_x = est_angles_np_deg[:, i].reshape(-1, 1)
+        train_y = np.rad2deg(gt_angle_data[i])
+        
+        min_len = min(len(train_x), len(train_y))
+        
+        model.fit(train_x[:min_len], train_y[:min_len])
+        
+        # Access the underlying linear model's coefficients for printing
+        if model.estimator_ is not None:
+            coef = model.estimator_.coef_[0]
+            intercept = model.estimator_.intercept_
+            print(f"  > {key.replace('_', ' ').title():<25} Correction: GT = {coef:.2f} * EKF + {intercept:.2f}")
+        
         corrected_angles_deg[:, i] = model.predict(est_angles_np_deg[:, i].reshape(-1, 1))
     
     return np.deg2rad(corrected_angles_deg)
 
 def post_process_angles_to_poses(est_angles, gt_poses_all, constants, device):
+    """
+    Applies a temporary angle swap for diagnostics.
+    """
     print("Converting estimated angles to SMPL poses...")
     num_frames = est_angles.shape[0]
     est_poses_full = torch.zeros_like(gt_poses_all)
     
     for t in range(num_frames):
-        # Unpack all three estimated angles
-        sh_pitch, sh_roll, el_pitch = est_angles[t, 0], est_angles[t, 1], est_angles[t, 2]
-        
-        # Combine roll and pitch for the shoulder using the EKF's 'yxz' convention
-        R_shoulder = R.from_euler('y', sh_roll).as_matrix() @ R.from_euler('x', sh_pitch).as_matrix()
-        shoulder_aa = R.from_matrix(R_shoulder).as_rotvec()
+        # --- DIAGNOSTIC SWAP ---
+        # The EKF gives us state [angle_0, angle_1, angle_2]
+        # Let's test the hypothesis that angle_0 is abduction and angle_1 is flexion
+        sh_abduction_val = est_angles[t, 0] # Test using state 0 for abduction
+        sh_flexion_val = est_angles[t, 1]   # Test using state 1 for flexion
+        el_flexion_val = est_angles[t, 2]
+        # --- END DIAGNOSTIC SWAP ---
 
-        # Elbow only has pitch
-        R_elbow = R.from_euler('x', el_pitch).as_matrix()
+        shoulder_angles_zxy = [sh_abduction_val, sh_flexion_val, 0.0]
+        shoulder_aa = R.from_euler('xyz', shoulder_angles_zxy).as_rotvec()
+
+        R_elbow = R.from_euler('y', el_flexion_val).as_matrix()
         elbow_aa = R.from_matrix(R_elbow).as_rotvec()
         
         est_poses_full[t, 1 + constants['SHLDR_POSE_IDX']] = torch.from_numpy(shoulder_aa).to(device)
@@ -266,40 +288,90 @@ def run_visualization(est_poses_full, gt_kinematics, constants, device):
     print("Visualization ready. Press 'P' to play/pause.")
     v.run()
 
-def calculate_performance_metrics(est_angles, gt_angles):
+def calculate_performance_metrics(raw_angles, corrected_angles, gt_angles):
     """
-    Calculates and prints key performance metrics (RMSE, MAE, Bias) for each angle.
+    Calculates and prints key performance metrics for both raw and corrected angles.
     """
     print("\n--- Estimator Performance Metrics ---")
     
-    # Convert inputs to degrees for reporting
-    est_angles_deg = np.rad2deg(est_angles)
+    raw_deg = np.rad2deg(raw_angles)
+    corrected_deg = np.rad2deg(corrected_angles)
     
-    angle_keys = ['sh_pitch', 'sh_roll', 'el_pitch']
-    gt_angle_data = [gt_angles['sh_pitch'], gt_angles['sh_roll'], gt_angles['el_pitch']]
+    angle_keys = ['sh_abduction', 'sh_flexion', 'el_flexion']
+    titles = ["Shoulder Abduction/Adduction", "Shoulder Flexion/Extension", "Elbow Flexion/Extension"]
 
-    # Header for the results table
-    print(f"{'Angle':<20} | {'RMSE (deg)':<15} | {'MAE (deg)':<15} | {'Bias (deg)':<15}")
-    print("-" * 70)
-
+    gt_angle_data = [gt_angles[key] for key in angle_keys]
+    
     for i, key in enumerate(angle_keys):
-        est = est_angles_deg[:, i]
         gt = np.rad2deg(gt_angle_data[i])
         
-        # Ensure arrays are the same length
-        min_len = min(len(est), len(gt))
-        est, gt = est[:min_len], gt[:min_len]
+        # --- Metrics for UNCALIBRATED (RAW) Data ---
+        raw = raw_deg[:, i]
+        if key == 'sh_roll': raw = np.rad2deg(np.unwrap(raw_angles[:, 1])) 
+        
+        min_len = min(len(raw), len(gt))
+        raw, gt_sliced = raw[:min_len], gt[:min_len]
+        
+        error_raw = raw - gt_sliced
+        rmse_raw = np.sqrt(np.mean(error_raw**2))
+        corr_raw, _ = pearsonr(raw, gt_sliced)
+        max_err_raw = np.max(np.abs(error_raw))
 
-        # Calculate error
-        error = est - gt
+        # --- Metrics for CALIBRATED (CORRECTED) Data ---
+        corrected = corrected_deg[:, i]
+        min_len = min(len(corrected), len(gt))
+        corrected, gt_sliced = corrected[:min_len], gt[:min_len]
+
+        error_corr = corrected - gt_sliced
+        rmse_corr = np.sqrt(np.mean(error_corr**2))
+        corr_corr, _ = pearsonr(corrected, gt_sliced)
+        max_err_corr = np.max(np.abs(error_corr))
         
-        # Calculate metrics
-        rmse = np.sqrt(np.mean(error**2))
-        mae = np.mean(np.abs(error))
-        bias = np.mean(error)
+        # --- Print Results ---
+        print(f"\n--- {key.replace('_', ' ').title()} ---")
+        print(f"{'':<25} | {'Uncalibrated':<20} | {'Calibrated':<20}")
+        print("-" * 70)
+        print(f"{'RMSE (deg)':<25} | {rmse_raw:<20.2f} | {rmse_corr:<20.2f}")
+        print(f"{'Max Error (deg)':<25} | {max_err_raw:<20.2f} | {max_err_corr:<20.2f}")
+        print(f"{'Correlation Coeff.':<25} | {corr_raw:<20.2f} | {corr_corr:<20.2f}")
+
+def plot_joint_angle_results(raw_angles, corrected_angles, gt_angles):
+    """
+    Plots GT, raw (uncalibrated), and corrected (calibrated) angles.
+    """
+    print("\nPlotting joint angle results...")
+    fig, axs = plt.subplots(3, 1, figsize=(20, 10), sharex=True)
+    fig.suptitle('EKF Joint Angle Estimation vs. Ground Truth (7-State)', fontsize=16)
+    
+    raw_deg = np.rad2deg(raw_angles)
+    corrected_deg = np.rad2deg(corrected_angles)
+    
+    angle_keys = ['sh_abduction', 'sh_flexion', 'el_flexion']
+    titles = ["Shoulder Abduction/Adduction", "Shoulder Flexion/Extension", "Elbow Flexion/Extension"]
+
+    gt_angle_data = [gt_angles[key] for key in angle_keys]
+
+    for i, ax in enumerate(axs):
+        # Plot Ground Truth
+        ax.plot(np.rad2deg(gt_angle_data[i]), label='GT', color='green')
         
-        # Print results in a formatted row
-        print(f"{key.replace('_', ' ').title():<20} | {rmse:<15.2f} | {mae:<15.2f} | {bias:<15.2f}")
+        # Plot Uncalibrated (Raw) Data
+        raw_plot_data = np.rad2deg(np.unwrap(raw_angles[:, i]))
+        ax.plot(raw_plot_data, label='EKF Raw (Uncalibrated)', color='orange', linestyle=':')
+        
+        # Plot Calibrated (Corrected) Data
+        corrected_plot_data = np.rad2deg(np.unwrap(corrected_angles[:, i]))
+        ax.plot(corrected_plot_data, label='EKF Final (Calibrated)', color='blue', linestyle='--')
+        
+        ax.set_title(titles[i])
+        ax.set_ylabel("Angle (degrees)")
+        ax.grid(True)
+        ax.legend()
+
+    axs[2].set_xlabel("Frame")
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
 
 if __name__ == "__main__":
     DATASET_PATH = "/home/danielamrhein/master_thesis/UIP_dataset/UIP_DB_Dataset/test.pt"
@@ -321,11 +393,6 @@ if __name__ == "__main__":
         
     constants = {'TARGET_ARM': TARGET_ARM, 'PELVIS_IDX': PELVIS_IDX, 'WRIST_IDX': WRIST_IDX,'SHLDR_JOINT_IDX': SHLDR_JOINT_IDX, 'ELBOW_JOINT_IDX': ELBOW_JOINT_IDX, 'WRIST_JOINT_IDX': WRIST_JOINT_IDX, 'SHLDR_POSE_IDX': SHLDR_POSE_IDX, 'ELBOW_POSE_IDX': ELBOW_POSE_IDX, 'POSE_KEY': POSE_KEY, 'TRAN_KEY': TRAN_KEY, 'ACC_KEY': ACC_KEY, 'SEQUENCE_INDEX': SEQUENCE_INDEX, 'DOWNSAMPLE_RATE': DOWNSAMPLE_RATE}
 
-    align_angle = -np.pi / 2.0
-    R_align = torch.tensor([[1.,0.,0.],[0.,np.cos(align_angle),-np.sin(align_angle)],[0.,np.sin(align_angle),np.cos(align_angle)]], dtype=torch.float32, device=DEVICE)
-    original_data[ORI_KEY][SEQUENCE_INDEX] = R_align.unsqueeze(0).unsqueeze(0) @ original_data[ORI_KEY][SEQUENCE_INDEX]
-    print("Applied coordinate system alignment.")
-
     gt_kinematics = get_ground_truth_kinematics(original_data, constants, DEVICE)
 
     # Make sure you have the UWB calibration function in your script
@@ -341,15 +408,12 @@ if __name__ == "__main__":
     estimated_angles_raw = run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, DEVICE, uwb_offset)
     
     # 2. Apply the final calibration to fix bias and scaling errors.
-    # estimated_angles_corrected = calibrate_and_correct_angles(estimated_angles_raw, gt_kinematics['gt_angles'])
+    estimated_angles_corrected = calibrate_and_correct_angles(estimated_angles_raw, gt_kinematics['gt_angles'])
     
     # 3. Calculate and report the final performance.
-    calculate_performance_metrics(estimated_angles_raw, gt_kinematics['gt_angles'])
+    calculate_performance_metrics(estimated_angles_raw, estimated_angles_corrected, gt_kinematics['gt_angles'])
 
-    run_visualization(
-        post_process_angles_to_poses(estimated_angles_raw, gt_kinematics['poses'], constants, DEVICE),
-        gt_kinematics, constants, DEVICE
-    )
+    run_visualization(post_process_angles_to_poses(estimated_angles_raw, gt_kinematics['poses'], constants, DEVICE), gt_kinematics, constants, DEVICE)
     
     # 4. Plot the final, highly accurate results.
-    plot_joint_angle_results(estimated_angles_raw, gt_kinematics['gt_angles'])
+    plot_joint_angle_results(estimated_angles_raw, estimated_angles_corrected, gt_kinematics['gt_angles'])

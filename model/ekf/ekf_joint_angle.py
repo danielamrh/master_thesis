@@ -14,22 +14,21 @@ class EKFJointAngle:
         self.x = torch.zeros(self.state_dim, 1, device=device, dtype=dtype)
         self.P = torch.eye(self.state_dim, device=device, dtype=dtype) * 0.1
 
-        # --- FINAL TUNING PARAMETERS ---
+        # --- TUNING PARAMETERS ---
         q_pitch_el_pos = 1e-4
         q_pitch_el_vel = 7e-4
         q_roll_pos = 1e-4
-        q_roll_vel = 5e-4
-        q_uwb_bias = 1e-7
+        q_roll_vel = 5e-5
+        q_uwb_bias = 1e-5
         uwb_std_dev = 0.2
         ori_std_dev = np.deg2rad(5.0)
         
-        self.wrist_offset = torch.tensor([0.0, -0.02, 0.10], device=device, dtype=dtype)
+        self.wrist_offset = torch.tensor([0.0, 0.0, 0.10], device=device, dtype=dtype)
         self.pelvis_offset = torch.tensor([0.10, 0.0, 0.0], device=device, dtype=dtype)
-        # --- END TUNING ---
 
         self.Q = torch.diag(torch.tensor([
-            q_pitch_el_pos, q_roll_pos, q_pitch_el_pos,
-            q_pitch_el_vel, q_roll_vel, q_pitch_el_vel,
+            q_roll_pos, q_pitch_el_pos, q_pitch_el_pos, # Positional variances
+            q_roll_vel, q_pitch_el_vel, q_pitch_el_vel, # Velocity variances
             q_uwb_bias], device=device, dtype=dtype))
         
         self.R_uwb = torch.eye(1, device=device, dtype=dtype) * (uwb_std_dev**2)
@@ -65,14 +64,19 @@ class EKFJointAngle:
         self._update_generic(y, h, H, self.R_damping)
 
     def expected_relative_orientation(self, angles=None):
+        """
+        CORRECTED: Models shoulder using a consistent intrinsic 'zxy' rotation.
+        """
         if angles is None: angles = self.x[0:3].squeeze()
-        sh_pitch, sh_roll, el_pitch = angles[0], angles[1], angles[2]
+        sh_flexion, sh_abduction, el_flexion = angles[0], angles[1], angles[2]
+
+        # --- FIX: Use the same intrinsic 'xyz' sequence ---
+        R_shoulder_world_mat = R.from_euler('xyz', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix() # X is
+        R_shoulder_world = torch.tensor(R_shoulder_world_mat, device=self.device, dtype=self.dtype)
+        # --- END FIX ---
         
-        R_sh_roll = R.from_euler('y', sh_roll.item()).as_matrix()
-        R_sh_pitch = R.from_euler('x', sh_pitch.item()).as_matrix()
-        R_el_pitch = R.from_euler('x', el_pitch.item()).as_matrix()
-        
-        R_exp_relative = torch.tensor(R_sh_roll @ R_sh_pitch @ R_el_pitch, device=self.device, dtype=self.dtype)
+        R_el_flexion = R.from_euler('y', el_flexion.item()).as_matrix()
+        R_exp_relative = R_shoulder_world @ torch.tensor(R_el_flexion, device=self.device, dtype=self.dtype)
         return R_exp_relative
 
     def update_orientation(self, R_w_world, R_p_world):
@@ -113,8 +117,8 @@ class EKFJointAngle:
 
         R_adaptive = self.R_uwb.clone()
         innovation_abs = torch.abs(innovation).item()
-        if innovation_abs > 0.03: 
-            R_adaptive *= (innovation_abs / 0.03)**2
+        if innovation_abs > 0.05: 
+            R_adaptive *= (innovation_abs / 0.05)**2
 
         S = H @ self.P @ H.T + R_adaptive
         nis = innovation.T @ torch.linalg.pinv(S) @ innovation
@@ -122,20 +126,26 @@ class EKFJointAngle:
         self._update_generic(y, h, H, R_adaptive)
 
     def h_forward_kinematics(self, p_shoulder, p_pelvis, R_pelvis, angles=None, bias=None):
+        """
+        Kinematics calculation.
+        """
         if angles is None: angles = self.x[0:3].squeeze()
         if bias is None: bias = self.x[6]
         
-        sh_pitch, sh_roll, el_pitch = angles[0], angles[1], angles[2]
-        
-        R_sh_roll = torch.tensor(R.from_euler('y', sh_roll.item()).as_matrix(), device=self.device, dtype=self.dtype)
-        R_sh_pitch = torch.tensor(R.from_euler('x', sh_pitch.item()).as_matrix(), device=self.device, dtype=self.dtype)
-        R_el_pitch = torch.tensor(R.from_euler('x', el_pitch.item()).as_matrix(), device=self.device, dtype=self.dtype)
+        sh_flexion, sh_abduction, el_flexion = angles[0], angles[1], angles[2]
 
-        R_shoulder = R_sh_roll @ R_sh_pitch
+        # --- FIX: Use the same intrinsic 'xyz' sequence ---
+        R_shoulder_mat = R.from_euler('xyz', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix()
+        R_shoulder = torch.tensor(R_shoulder_mat, device=self.device, dtype=self.dtype)
+        # --- END FIX ---
+        
+        R_el_flexion_mat = R.from_euler('y', el_flexion.item()).as_matrix()
+        R_el_flexion = torch.tensor(R_el_flexion_mat, device=self.device, dtype=self.dtype)
+
         v_upper_arm_local = torch.tensor([0.0, -self.l1, 0.0], device=self.device, dtype=self.dtype)
         p_elbow = p_shoulder + (R_pelvis @ R_shoulder @ v_upper_arm_local)
         
-        R_elbow_world = R_pelvis @ R_shoulder @ R_el_pitch
+        R_elbow_world = R_pelvis @ R_shoulder @ R_el_flexion
         v_forearm_local = torch.tensor([0.0, -self.l2, 0.0], device=self.device, dtype=self.dtype)
         p_wrist_joint = p_elbow + (R_elbow_world @ v_forearm_local)
         
