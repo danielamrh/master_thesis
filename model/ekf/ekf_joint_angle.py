@@ -16,9 +16,9 @@ class EKFJointAngle:
 
         # --- TUNING PARAMETERS ---
         q_pitch_el_pos = 1e-4
-        q_pitch_el_vel = 7e-4
+        q_pitch_el_vel = 7e-3
         q_roll_pos = 1e-4
-        q_roll_vel = 5e-5
+        q_roll_vel = 5e-4
         q_uwb_bias = 1e-5
         uwb_std_dev = 0.2
         ori_std_dev = np.deg2rad(5.0)
@@ -65,18 +65,27 @@ class EKFJointAngle:
 
     def expected_relative_orientation(self, angles=None):
         """
-        CORRECTED: Models shoulder using a consistent intrinsic 'zxy' rotation.
+        CORRECTED: Models the orientation of the wrist sensor relative to the
+        pelvis sensor frame. This now matches the measurement R_p_world.T @ R_w_world.
         """
-        if angles is None: angles = self.x[0:3].squeeze()
-        sh_flexion, sh_abduction, el_flexion = angles[0], angles[1], angles[2]
+        if angles is None:
+            angles = self.x[0:3].squeeze()
+        sh_abduction, sh_flexion, el_flexion = angles[0], angles[1], angles[2]
 
-        # --- FIX: Use the same intrinsic 'xyz' sequence ---
-        R_shoulder_world_mat = R.from_euler('xyz', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix() # X is
-        R_shoulder_world = torch.tensor(R_shoulder_world_mat, device=self.device, dtype=self.dtype)
-        # --- END FIX ---
-        
-        R_el_flexion = R.from_euler('y', el_flexion.item()).as_matrix()
-        R_exp_relative = R_shoulder_world @ torch.tensor(R_el_flexion, device=self.device, dtype=self.dtype)
+        # Shoulder rotation defined relative to the parent (pelvis) frame.
+        # Using 'zyx' is often more stable for shoulders than 'xyz' (see recommendation #2).
+        # Make sure this matches your GT generation.
+        R_sh_from_pelvis_mat = R.from_euler('zyx', [0, sh_abduction.item(), sh_flexion.item()]).as_matrix()
+        R_sh_from_pelvis = torch.tensor(R_sh_from_pelvis_mat, device=self.device, dtype=self.dtype)
+
+        # Elbow rotation is relative to the upper arm frame.
+        R_el_from_sh_mat = R.from_euler('y', el_flexion.item()).as_matrix()
+        R_el_from_sh = torch.tensor(R_el_from_sh_mat, device=self.device, dtype=self.dtype)
+
+        # The total expected relative rotation is the chain from pelvis -> shoulder -> elbow.
+        # This now models the same physical quantity as the measurement.
+        R_exp_relative = R_sh_from_pelvis @ R_el_from_sh
+
         return R_exp_relative
 
     def update_orientation(self, R_w_world, R_p_world):
@@ -129,17 +138,18 @@ class EKFJointAngle:
         """
         Kinematics calculation.
         """
-        if angles is None: angles = self.x[0:3].squeeze()
-        if bias is None: bias = self.x[6]
+        if angles is None: 
+            angles = self.x[0:3].squeeze()
+        if bias is None: 
+            bias = self.x[6]
         
-        sh_flexion, sh_abduction, el_flexion = angles[0], angles[1], angles[2]
+        sh_abduction, sh_flexion, el_flexion = angles[0], angles[1], angles[2]
 
-        # --- FIX: Use the same intrinsic 'xyz' sequence ---
-        R_shoulder_mat = R.from_euler('xyz', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix()
-        R_shoulder = torch.tensor(R_shoulder_mat, device=self.device, dtype=self.dtype)
-        # --- END FIX ---
         
-        R_el_flexion_mat = R.from_euler('y', el_flexion.item()).as_matrix()
+        R_shoulder_mat = R.from_euler('zyx', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix() 
+        R_shoulder = torch.tensor(R_shoulder_mat, device=self.device, dtype=self.dtype)
+        
+        R_el_flexion_mat = R.from_euler('y', el_flexion.item()).as_matrix() 
         R_el_flexion = torch.tensor(R_el_flexion_mat, device=self.device, dtype=self.dtype)
 
         v_upper_arm_local = torch.tensor([0.0, -self.l1, 0.0], device=self.device, dtype=self.dtype)

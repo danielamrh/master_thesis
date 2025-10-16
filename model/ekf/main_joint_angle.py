@@ -82,14 +82,14 @@ def get_ground_truth_kinematics(original_data, constants, device):
     gt_shoulder_aa = gt_poses_all[:, 1 + constants['SHLDR_POSE_IDX'], :].cpu().numpy()
     gt_elbow_aa = gt_poses_all[:, 1 + constants['ELBOW_POSE_IDX'], :].cpu().numpy()
 
-    gt_shoulder_euler = R.from_rotvec(gt_shoulder_aa).as_euler('zxy')
-    gt_elbow_euler = R.from_rotvec(gt_elbow_aa).as_euler('zxy') 
+    gt_shoulder_euler = R.from_rotvec(gt_shoulder_aa).as_euler('zyx') 
+    gt_elbow_euler = R.from_rotvec(gt_elbow_aa).as_euler('zyx') 
     
     # --- PERMANENT FIX: SWAP THE ANGLE ASSIGNMENTS ---
     # EKF State 0 will be Abduction, State 1 will be Flexion.
     gt_angles_for_plotting = {
-        'sh_abduction': gt_shoulder_euler[:, 0], # Abduction is the Z component (first)
-        'sh_flexion':   gt_shoulder_euler[:, 1], # Flexion is the X component (second)
+        'sh_abduction': gt_shoulder_euler[:, 2], # Abduction is the Z component (first)
+        'sh_flexion':   gt_shoulder_euler[:, 1], # Flexion is the Y component (second)
         'el_flexion':   gt_elbow_euler[:, 1]
     }
     # --- END FIX ---
@@ -231,8 +231,8 @@ def post_process_angles_to_poses(est_angles, gt_poses_all, constants, device):
         el_flexion_val = est_angles[t, 2]
         # --- END DIAGNOSTIC SWAP ---
 
-        shoulder_angles_zxy = [sh_abduction_val, sh_flexion_val, 0.0]
-        shoulder_aa = R.from_euler('xyz', shoulder_angles_zxy).as_rotvec()
+        shoulder_angles_zyx = [sh_abduction_val, sh_flexion_val, 0.0]
+        shoulder_aa = R.from_euler('zyx', shoulder_angles_zyx).as_rotvec()
 
         R_elbow = R.from_euler('y', el_flexion_val).as_matrix()
         elbow_aa = R.from_matrix(R_elbow).as_rotvec()
@@ -341,7 +341,7 @@ def plot_joint_angle_results(raw_angles, corrected_angles, gt_angles):
     """
     print("\nPlotting joint angle results...")
     fig, axs = plt.subplots(3, 1, figsize=(20, 10), sharex=True)
-    fig.suptitle('EKF Joint Angle Estimation vs. Ground Truth (7-State)', fontsize=16)
+    fig.suptitle(f'EKF Joint Angle Estimation vs. Ground Truth (7-State) for Sequence {SEQUENCE_INDEX}', fontsize=16)
     
     raw_deg = np.rad2deg(raw_angles)
     corrected_deg = np.rad2deg(corrected_angles)
