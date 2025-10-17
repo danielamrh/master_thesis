@@ -78,21 +78,20 @@ def get_ground_truth_kinematics(original_data, constants, device):
     forearm_length = torch.linalg.norm(p_wrist_t0 - p_elbow_t0).item()
     print(f"  > Upper arm length: {upper_arm_length:.4f} m, Forearm length: {forearm_length:.4f} m")
 
-    # --- CORRECTLY CONVERT AXIS-ANGLE TO ANATOMICAL EULER ANGLES ---
+    # Get anatomical angles from pose parameters
     gt_shoulder_aa = gt_poses_all[:, 1 + constants['SHLDR_POSE_IDX'], :].cpu().numpy()
     gt_elbow_aa = gt_poses_all[:, 1 + constants['ELBOW_POSE_IDX'], :].cpu().numpy()
 
+    # Convert axis-angle to Euler angles (ZYX order)
     gt_shoulder_euler = R.from_rotvec(gt_shoulder_aa).as_euler('zyx') 
     gt_elbow_euler = R.from_rotvec(gt_elbow_aa).as_euler('zyx') 
     
-    # --- PERMANENT FIX: SWAP THE ANGLE ASSIGNMENTS ---
-    # EKF State 0 will be Abduction, State 1 will be Flexion.
+    # Map to anatomical angles
     gt_angles_for_plotting = {
-        'sh_abduction': gt_shoulder_euler[:, 2], # Abduction is the Z component (first)
+        'sh_abduction': gt_shoulder_euler[:, 0], # Abduction is the Z component (first)
         'sh_flexion':   gt_shoulder_euler[:, 1], # Flexion is the Y component (second)
-        'el_flexion':   gt_elbow_euler[:, 1]
+        'el_flexion':   gt_elbow_euler[:, 1]     # Elbow flexion is around Y axis
     }
-    # --- END FIX ---
 
     kinematics = {
         "joints": gt_joints_all_frames, 
@@ -104,10 +103,38 @@ def get_ground_truth_kinematics(original_data, constants, device):
     }
     return kinematics
 
-def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, uwb_offset=0.0):
+def get_shoulder_pelvis_offset(gt_kinematics, sensor_data, constants):
+    """
+    Calculates the static anatomical offset vector from the pelvis joint to the
+    shoulder joint in the PELVIS'S LOCAL COORDINATE SYSTEM.
+    """
+    gt_joints = gt_kinematics['joints']
+    
+    # 1. Get world-frame joint positions from T-pose (t=0)
+    p_pelvis_t0_world = gt_joints[0, 0, :]
+    p_shoulder_t0_world = gt_joints[0, constants['SHLDR_JOINT_IDX'], :]
+    offset_world_t0 = p_shoulder_t0_world - p_pelvis_t0_world
+
+    # 2. Get the pelvis orientation in the world frame at t=0
+    R_pelvis_world_t0 = sensor_data['ori'][0, constants['PELVIS_IDX'], :, :]
+
+    # 3. Transform the world-space offset into the local pelvis-space offset
+    offset_local = R_pelvis_world_t0.T @ offset_world_t0
+    
+    print(f"\n--- Calibrating Pelvis-Shoulder Offset ---")
+    print(f"  > Calculated local offset vector: {offset_local.cpu().numpy()}")
+    return offset_local
+
+def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, uwb_offset=0.0, shoulder_pelvis_offset=None):
     print("\n--- Running EKF Pipeline with Initial T-Pose Calibration ---")
     num_frames = sensor_data['acc'].shape[0]
-    ekf = EKFJointAngle(bone_lengths=gt_kinematics['bone_lengths'], device=device, dt=1/100.0)
+    
+    # Pass the new offset to the EKF constructor
+    ekf = EKFJointAngle(bone_lengths=gt_kinematics['bone_lengths'],
+                        shoulder_pelvis_offset=shoulder_pelvis_offset,
+                        device=device,
+                        dt=1/100.0)
+    
     ekf.set_initial_state(torch.zeros(3, device=device))
     
     estimated_angles_history = []
@@ -138,12 +165,11 @@ def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, 
             if torch.var(torch.stack(acc_buffer), dim=0).mean() < zavu_threshold:
                 ekf.update_zero_angular_velocity()
 
-        R_p_world_t, R_w_world_t = pelvis_orientation_seq[t], wrist_orientation_seq[t]
-        ekf.update_orientation(R_w_world_t, R_p_world_t)
+        R_p_world_t = pelvis_orientation_seq[t]
+        ekf.update_orientation(wrist_orientation_seq[t], R_p_world_t)
         uwb_meas_corrected = uwb_dists[t].item() - uwb_offset
         if uwb_meas_corrected > 0.0:
-            p_shoulder_t, p_pelvis_t = gt_shoulder_path[t], gt_pelvis_path[t]
-            ekf.update_uwb_distance(uwb_meas_corrected, p_shoulder_t, p_pelvis_t, R_p_world_t)
+            ekf.update_uwb_distance(uwb_meas_corrected, R_p_world_t)
         
         # --- BIAS CALCULATION AND CORRECTION ---
         # At the end of the warm-up period, calculate the bias vector
@@ -234,7 +260,7 @@ def post_process_angles_to_poses(est_angles, gt_poses_all, constants, device):
         shoulder_angles_zyx = [sh_abduction_val, sh_flexion_val, 0.0]
         shoulder_aa = R.from_euler('zyx', shoulder_angles_zyx).as_rotvec()
 
-        R_elbow = R.from_euler('y', el_flexion_val).as_matrix()
+        R_elbow = R.from_euler('zyx', [0, el_flexion_val, 0]).as_matrix()
         elbow_aa = R.from_matrix(R_elbow).as_rotvec()
         
         est_poses_full[t, 1 + constants['SHLDR_POSE_IDX']] = torch.from_numpy(shoulder_aa).to(device)
@@ -393,19 +419,21 @@ if __name__ == "__main__":
         
     constants = {'TARGET_ARM': TARGET_ARM, 'PELVIS_IDX': PELVIS_IDX, 'WRIST_IDX': WRIST_IDX,'SHLDR_JOINT_IDX': SHLDR_JOINT_IDX, 'ELBOW_JOINT_IDX': ELBOW_JOINT_IDX, 'WRIST_JOINT_IDX': WRIST_JOINT_IDX, 'SHLDR_POSE_IDX': SHLDR_POSE_IDX, 'ELBOW_POSE_IDX': ELBOW_POSE_IDX, 'POSE_KEY': POSE_KEY, 'TRAN_KEY': TRAN_KEY, 'ACC_KEY': ACC_KEY, 'SEQUENCE_INDEX': SEQUENCE_INDEX, 'DOWNSAMPLE_RATE': DOWNSAMPLE_RATE}
 
-    gt_kinematics = get_ground_truth_kinematics(original_data, constants, DEVICE)
-
-    # Make sure you have the UWB calibration function in your script
-    uwb_offset = calibrate_uwb_from_t_pose(original_data[UWB_KEY][SEQUENCE_INDEX], gt_kinematics, constants)
-    
     sensor_data = {
         'acc': original_data[ACC_KEY][SEQUENCE_INDEX],
         'ori': original_data[ORI_KEY][SEQUENCE_INDEX],
         'uwb': original_data[UWB_KEY][SEQUENCE_INDEX]
     }
+
+    gt_kinematics = get_ground_truth_kinematics(original_data, constants, DEVICE)
+
+    shoulder_pelvis_offset = get_shoulder_pelvis_offset(gt_kinematics, sensor_data, constants)
+
+    # Make sure you have the UWB calibration function in your script
+    uwb_offset = calibrate_uwb_from_t_pose(original_data[UWB_KEY][SEQUENCE_INDEX], gt_kinematics, constants)
     
     # 1. Run the EKF to get a stable, drift-free, but biased estimate.
-    estimated_angles_raw = run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, DEVICE, uwb_offset)
+    estimated_angles_raw = run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, DEVICE, uwb_offset, shoulder_pelvis_offset)
     
     # 2. Apply the final calibration to fix bias and scaling errors.
     estimated_angles_corrected = calibrate_and_correct_angles(estimated_angles_raw, gt_kinematics['gt_angles'])

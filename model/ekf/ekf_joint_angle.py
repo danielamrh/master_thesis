@@ -6,10 +6,12 @@ def wrap_angle(angle):
     return (angle + torch.pi) % (2 * torch.pi) - torch.pi
 
 class EKFJointAngle:
-    def __init__(self, bone_lengths, device='cpu', dtype=torch.float32, dt=0.01):
+    def __init__(self, shoulder_pelvis_offset, bone_lengths, device='cpu', dtype=torch.float32, dt=0.01):
         self.device = device; self.dtype = dtype; self.dt = dt
         self.l1 = bone_lengths[0]; self.l2 = bone_lengths[1]
-        
+
+        self.shoulder_pelvis_offset = shoulder_pelvis_offset.to(device=device, dtype=dtype)
+
         self.state_dim = 7
         self.x = torch.zeros(self.state_dim, 1, device=device, dtype=dtype)
         self.P = torch.eye(self.state_dim, device=device, dtype=dtype) * 0.1
@@ -25,6 +27,8 @@ class EKFJointAngle:
         
         self.wrist_offset = torch.tensor([0.0, 0.0, 0.10], device=device, dtype=dtype)
         self.pelvis_offset = torch.tensor([0.10, 0.0, 0.0], device=device, dtype=dtype)
+
+        self.R_sh_to_el_offset = torch.eye(3, device=device, dtype=dtype)
 
         self.Q = torch.diag(torch.tensor([
             q_roll_pos, q_pitch_el_pos, q_pitch_el_pos, # Positional variances
@@ -72,22 +76,18 @@ class EKFJointAngle:
             angles = self.x[0:3].squeeze()
         sh_abduction, sh_flexion, el_flexion = angles[0], angles[1], angles[2]
 
-        # Shoulder rotation defined relative to the parent (pelvis) frame.
-        # Using 'zyx' is often more stable for shoulders than 'xyz' (see recommendation #2).
-        # Make sure this matches your GT generation.
-        R_sh_from_pelvis_mat = R.from_euler('zyx', [0, sh_abduction.item(), sh_flexion.item()]).as_matrix()
+        R_sh_from_pelvis_mat = R.from_euler('zyx', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix()
         R_sh_from_pelvis = torch.tensor(R_sh_from_pelvis_mat, device=self.device, dtype=self.dtype)
 
-        # Elbow rotation is relative to the upper arm frame.
-        R_el_from_sh_mat = R.from_euler('y', el_flexion.item()).as_matrix()
+        R_el_from_sh_mat = R.from_euler('zyx', [0, el_flexion.item(), 0]).as_matrix()
         R_el_from_sh = torch.tensor(R_el_from_sh_mat, device=self.device, dtype=self.dtype)
 
-        # The total expected relative rotation is the chain from pelvis -> shoulder -> elbow.
-        # This now models the same physical quantity as the measurement.
+        # --- FIX: Remove the static offset (it's Identity) to match SMPL chain ---
+        # R_exp_relative = R_sh_from_pelvis @ self.R_sh_to_el_offset @ R_el_from_sh 
         R_exp_relative = R_sh_from_pelvis @ R_el_from_sh
 
         return R_exp_relative
-
+    
     def update_orientation(self, R_w_world, R_p_world):
         R_meas_relative = R_p_world.T @ R_w_world
         R_exp_relative = self.expected_relative_orientation()
@@ -114,10 +114,10 @@ class EKFJointAngle:
             
         self._update_generic(y, h, H, R_adaptive_ori)
 
-    def update_uwb_distance(self, uwb_distance, p_shoulder_world, p_pelvis_world, R_pelvis_world):
-        h = self.h_forward_kinematics(p_shoulder_world, p_pelvis_world, R_pelvis_world)
+    def update_uwb_distance(self, uwb_distance, R_pelvis_world): # No longer needs p_shoulder, p_pelvis
+        h = self.h_forward_kinematics(R_pelvis_world) # Pass only R_pelvis
         y = torch.tensor([[uwb_distance]], device=self.device, dtype=self.dtype)
-        H = self._H_jacobian_numerical_uwb(p_shoulder_world, p_pelvis_world, R_pelvis_world)
+        H = self._H_jacobian_numerical_uwb(R_pelvis_world) # Pass only R_pelvis
         innovation = y - h
 
         if torch.abs(innovation).item() > 0.5:
@@ -134,43 +134,58 @@ class EKFJointAngle:
         if nis.item() > 3.84: return
         self._update_generic(y, h, H, R_adaptive)
 
-    def h_forward_kinematics(self, p_shoulder, p_pelvis, R_pelvis, angles=None, bias=None):
+    def h_forward_kinematics(self, R_pelvis, angles=None, bias=None):
         """
-        Kinematics calculation.
+        CORRECTED: Kinematics calculation independent of ground truth joint positions.
+        It now computes sensor locations relative to a conceptual pelvis origin (0,0,0)
+        and orients the entire structure using the pelvis IMU.
         """
-        if angles is None: 
-            angles = self.x[0:3].squeeze()
-        if bias is None: 
-            bias = self.x[6]
-        
+        if angles is None: angles = self.x[0:3].squeeze()
+        if bias is None: bias = self.x[6]
+
         sh_abduction, sh_flexion, el_flexion = angles[0], angles[1], angles[2]
 
-        
-        R_shoulder_mat = R.from_euler('zyx', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix() 
-        R_shoulder = torch.tensor(R_shoulder_mat, device=self.device, dtype=self.dtype)
-        
-        R_el_flexion_mat = R.from_euler('y', el_flexion.item()).as_matrix() 
+        # 1. Determine the shoulder position using the fixed offset from the pelvis
+        #    and the current pelvis orientation.
+        p_shoulder = R_pelvis @ self.shoulder_pelvis_offset
+
+        # 2. Define shoulder and elbow rotations relative to their parent frames
+        R_shoulder_mat = R.from_euler('zyx', [sh_abduction.item(), sh_flexion.item(), 0]).as_matrix()
+        R_shoulder_from_pelvis = torch.tensor(R_shoulder_mat, device=self.device, dtype=self.dtype)
+
+        R_el_flexion_mat = R.from_euler('zyx', [0, el_flexion.item(), 0]).as_matrix()
         R_el_flexion = torch.tensor(R_el_flexion_mat, device=self.device, dtype=self.dtype)
 
-        v_upper_arm_local = torch.tensor([0.0, -self.l1, 0.0], device=self.device, dtype=self.dtype)
-        p_elbow = p_shoulder + (R_pelvis @ R_shoulder @ v_upper_arm_local)
+        # 3. Calculate world-frame orientations and positions down the arm
+        R_shoulder_world = R_pelvis @ R_shoulder_from_pelvis
         
-        R_elbow_world = R_pelvis @ R_shoulder @ R_el_flexion
-        v_forearm_local = torch.tensor([0.0, -self.l2, 0.0], device=self.device, dtype=self.dtype)
+        # --- FIX: The chain is simpler for SMPL. R_sh_to_el_offset is Identity. ---
+        # R_elbow_world = R_shoulder_world @ self.R_sh_to_el_offset @ R_el_flexion 
+        R_elbow_world = R_shoulder_world @ R_el_flexion 
+
+        # --- FIX: Bone vectors are along the +X axis in SMPL convention ---
+        v_upper_arm_local = torch.tensor([self.l1, 0.0, 0.0], device=self.device, dtype=self.dtype)
+        v_forearm_local = torch.tensor([self.l2, 0.0, 0.0], device=self.device, dtype=self.dtype)
+        
+        p_elbow = p_shoulder + (R_shoulder_world @ v_upper_arm_local)
+        # --- FIX: Use R_elbow_world to transform the forearm vector ---
         p_wrist_joint = p_elbow + (R_elbow_world @ v_forearm_local)
-        
+
+        # 4. Calculate the final world-frame positions of the two UWB sensors
         p_wrist_sensor = p_wrist_joint + (R_elbow_world @ self.wrist_offset)
-        p_pelvis_sensor = p_pelvis + (R_pelvis @ self.pelvis_offset)
+        p_pelvis_sensor = R_pelvis @ self.pelvis_offset # Pelvis sensor relative to pelvis joint
+
+        # 5. The expected distance is the norm of the difference vector
         expected_dist = torch.linalg.norm(p_wrist_sensor - p_pelvis_sensor) + bias
         return expected_dist.view(1, 1)
 
-    def _H_jacobian_numerical_uwb(self, p_shoulder, p_pelvis, R_pelvis, epsilon=1e-5):
+    def _H_jacobian_numerical_uwb(self, R_pelvis, epsilon=1e-5): # No longer needs p_shoulder, p_pelvis
         H = torch.zeros(1, self.state_dim, device=self.device, dtype=self.dtype)
         for i in range(3):
             angles_plus = self.x[0:3].clone(); angles_plus[i] += epsilon
-            h_plus = self.h_forward_kinematics(p_shoulder, p_pelvis, R_pelvis, angles=angles_plus)
+            h_plus = self.h_forward_kinematics(R_pelvis, angles=angles_plus) # Pass only R_pelvis
             angles_minus = self.x[0:3].clone(); angles_minus[i] -= epsilon
-            h_minus = self.h_forward_kinematics(p_shoulder, p_pelvis, R_pelvis, angles=angles_minus)
+            h_minus = self.h_forward_kinematics(R_pelvis, angles=angles_minus) # Pass only R_pelvis
             H[0, i] = (h_plus - h_minus) / (2 * epsilon)
         H[0, 6] = 1.0
         return H
