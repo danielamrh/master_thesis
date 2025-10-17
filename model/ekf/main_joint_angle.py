@@ -126,6 +126,9 @@ def get_shoulder_pelvis_offset(gt_kinematics, sensor_data, constants):
     return offset_local
 
 def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, uwb_offset=0.0, shoulder_pelvis_offset=None):
+    """
+    Runs the EKF joint angle estimation pipeline on the provided sensor data.
+    """
     print("\n--- Running EKF Pipeline with Initial T-Pose Calibration ---")
     num_frames = sensor_data['acc'].shape[0]
     
@@ -170,9 +173,8 @@ def run_ekf_joint_angle_pipeline(sensor_data, gt_kinematics, constants, device, 
         uwb_meas_corrected = uwb_dists[t].item() - uwb_offset
         if uwb_meas_corrected > 0.0:
             ekf.update_uwb_distance(uwb_meas_corrected, R_p_world_t)
-        
+
         # --- BIAS CALCULATION AND CORRECTION ---
-        # At the end of the warm-up period, calculate the bias vector
         if t == WARMUP_FRAMES:
             estimated_t_pose_angles = ekf.get_state_angles().cpu().numpy()
             bias_vector = estimated_t_pose_angles - target_t_pose_angles
@@ -242,20 +244,17 @@ def calibrate_and_correct_angles(est_angles, gt_angles):
 
 def post_process_angles_to_poses(est_angles, gt_poses_all, constants, device):
     """
-    Applies a temporary angle swap for diagnostics.
+    Converts estimated anatomical angles back to full SMPL pose parameters.
     """
     print("Converting estimated angles to SMPL poses...")
     num_frames = est_angles.shape[0]
     est_poses_full = torch.zeros_like(gt_poses_all)
     
     for t in range(num_frames):
-        # --- DIAGNOSTIC SWAP ---
-        # The EKF gives us state [angle_0, angle_1, angle_2]
-        # Let's test the hypothesis that angle_0 is abduction and angle_1 is flexion
-        sh_abduction_val = est_angles[t, 0] # Test using state 0 for abduction
-        sh_flexion_val = est_angles[t, 1]   # Test using state 1 for flexion
-        el_flexion_val = est_angles[t, 2]
-        # --- END DIAGNOSTIC SWAP ---
+        # Start with a T-pose for all frames
+        sh_abduction_val = est_angles[t, 0] # Shoulder abduction/adduction
+        sh_flexion_val = est_angles[t, 1]   # Shoulder flexion/extension
+        el_flexion_val = est_angles[t, 2]   # Elbow flexion/extension
 
         shoulder_angles_zyx = [sh_abduction_val, sh_flexion_val, 0.0]
         shoulder_aa = R.from_euler('zyx', shoulder_angles_zyx).as_rotvec()
@@ -269,6 +268,9 @@ def post_process_angles_to_poses(est_angles, gt_poses_all, constants, device):
     return est_poses_full
 
 def run_visualization(est_poses_full, gt_kinematics, constants, device):
+    """
+    Runs the SMPL visualization for the estimated and ground truth poses.
+    """
     print("\nSetting up SMPL visualization...")
     v = Viewer()
     downsample_rate = constants.get('DOWNSAMPLE_RATE', 1)
@@ -425,8 +427,10 @@ if __name__ == "__main__":
         'uwb': original_data[UWB_KEY][SEQUENCE_INDEX]
     }
 
+    # Pre-calculate ground truth kinematics
     gt_kinematics = get_ground_truth_kinematics(original_data, constants, DEVICE)
 
+    # Get the pelvis-to-shoulder offset in the pelvis's local frame
     shoulder_pelvis_offset = get_shoulder_pelvis_offset(gt_kinematics, sensor_data, constants)
 
     # Make sure you have the UWB calibration function in your script
@@ -441,7 +445,8 @@ if __name__ == "__main__":
     # 3. Calculate and report the final performance.
     calculate_performance_metrics(estimated_angles_raw, estimated_angles_corrected, gt_kinematics['gt_angles'])
 
+    # 4. Visualize the results in SMPL.
     run_visualization(post_process_angles_to_poses(estimated_angles_raw, gt_kinematics['poses'], constants, DEVICE), gt_kinematics, constants, DEVICE)
-    
-    # 4. Plot the final, highly accurate results.
+
+    # 5. Plot the final, highly accurate results.
     plot_joint_angle_results(estimated_angles_raw, estimated_angles_corrected, gt_kinematics['gt_angles'])
