@@ -402,7 +402,7 @@ def plot_joint_angle_results(raw_angles, corrected_angles, gt_angles):
 
 
 if __name__ == "__main__":
-    DATASET_PATH = "/home/danielamrhein/master_thesis/UIP_dataset/UIP_DB_Dataset/test.pt"
+    DATASET_PATH = "/home/danielamrhein/master_thesis/UIP_dataset/UIP_DB_Dataset/train.pt"
     SMPL_MODEL_DIR = "/home/danielamrhein/master_thesis/data/smplx_models"
     os.environ["SMPLX_MODEL_DIR"] = SMPL_MODEL_DIR
     
