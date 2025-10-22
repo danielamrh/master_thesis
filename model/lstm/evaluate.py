@@ -47,7 +47,7 @@ def evaluate_continuous(model, test_dataset, stats, sequence_length):
             
             # 4. Get the prediction for the *last* frame in the window
             # Shape: (output_size,)
-            last_frame_prediction = prediction_seq[0, -1, :].cpu()
+            last_frame_prediction = prediction_seq[0, -1, :].cpu() 
             
             # 5. Get the corresponding ground truth for that last frame
             target_frame = targets_normalized[i + sequence_length - 1]
@@ -72,25 +72,39 @@ def evaluate_continuous(model, test_dataset, stats, sequence_length):
 
 def plot_evaluation(predictions, targets):
     """
-    Plots the continuous predictions vs. ground truth and the error over time.
+    Plots the continuous predictions vs. ground truth (within a specified window) 
+    and the error over the full time series.
     """
     print("Generating evaluation plots...")
     
-    # Calculate error
-    # We will use Euclidean distance in the 6D angle space
+    # Calculate error for the *entire* sequence
     rmse_per_frame = np.sqrt(np.mean((predictions - targets)**2, axis=1)) # RMSE across 6 features
     mean_rmse = np.mean(rmse_per_frame)
     
     print(f"Overall Mean RMSE (over all frames and all {OUTPUT_SIZE} angles): {mean_rmse:.4f} radians")
     print(f"Overall Mean RMSE in degrees: {mean_rmse * (180/np.pi):.2f} degrees")
 
-    num_frames = len(predictions)
-    time_axis = np.arange(num_frames)
+    num_total_frames = len(predictions)
+    full_time_axis = np.arange(num_total_frames)
     
-    # --- Plot 1: Per-Joint Angles ---
-    # We have 6 output features: 3 for shoulder, 3 for elbow
+    # --- Determine the plotting window ---
+    start = max(0, PLOT_WINDOW_START_FRAME)
+    # Ensure end frame doesn't exceed available frames
+    end = min(num_total_frames, PLOT_WINDOW_END_FRAME) 
+    if start >= end:
+        print(f"Warning: Plot window start ({start}) >= end ({end}). Plotting first 500 frames instead.")
+        start = 0
+        end = min(num_total_frames, 500)
+        
+    plot_time_axis = np.arange(start, end)
+    plot_predictions = predictions[start:end]
+    plot_targets = targets[start:end]
+    
+    print(f"Plotting frames {start} to {end-1} for angle comparison.")
+
+    # --- Plot 1: Per-Joint Angles (Windowed) ---
     fig, axs = plt.subplots(OUTPUT_SIZE, 1, figsize=(15, 12), sharex=True)
-    fig.suptitle('Continuous Frame-by-Frame Evaluation (Denormalized Axis-Angle)', fontsize=16)
+    fig.suptitle(f'Continuous Evaluation (Frames {start}-{end-1}) - Denormalized Axis-Angle', fontsize=16)
     
     joint_names = [
         'Shoulder (Axis-X)', 'Shoulder (Axis-Y)', 'Shoulder (Axis-Z)',
@@ -98,29 +112,31 @@ def plot_evaluation(predictions, targets):
     ]
     
     for i in range(OUTPUT_SIZE):
-        axs[i].plot(time_axis, targets[:, i], label='Ground Truth', color='blue')
-        axs[i].plot(time_axis, predictions[:, i], label='Prediction', color='red', linestyle='--')
+        axs[i].plot(plot_time_axis, plot_targets[:, i], label='Ground Truth', color='blue', linewidth=1.5)
+        axs[i].plot(plot_time_axis, plot_predictions[:, i], label='Prediction', color='red', linestyle='--', linewidth=1.0)
         axs[i].set_ylabel(joint_names[i])
         axs[i].legend()
         axs[i].grid(True)
         
-    axs[-1].set_xlabel('Time (Frames)')
+    axs[-1].set_xlabel(f'Time (Frames {start}-{end-1})')
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-    plt.savefig('evaluation_continuous_angles.png')
-    print("Saved continuous angle plot to 'evaluation_continuous_angles.png'")
+    plt.savefig('evaluation_continuous_angles_windowed.png')
+    print("Saved windowed angle plot to 'evaluation_continuous_angles_windowed.png'")
+    plt.close(fig) # Close the figure to free memory
 
-    # --- Plot 2: RMSE Error Over Time ---
+    # --- Plot 2: RMSE Error Over Full Time ---
     plt.figure(figsize=(15, 5))
-    plt.plot(time_axis, rmse_per_frame, label='Per-Frame RMSE')
+    plt.plot(full_time_axis, rmse_per_frame, label='Per-Frame RMSE', linewidth=0.8)
     plt.axhline(y=mean_rmse, color='r', linestyle='--', label=f'Mean RMSE: {mean_rmse:.4f}')
-    plt.title('Prediction Error (RMSE) Over Time')
+    plt.title('Prediction Error (RMSE) Over Full Time Series')
     plt.xlabel('Time (Frames)')
     plt.ylabel('RMSE (Radians)')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig('evaluation_continuous_error.png')
-    print("Saved continuous error plot to 'evaluation_continuous_error.png'")
+    plt.savefig('evaluation_continuous_error_full.png')
+    print("Saved full error plot to 'evaluation_continuous_error_full.png'")
+    plt.close() # Close the figure
 
 def main():
     print(f"Using device: {DEVICE}")
@@ -172,7 +188,7 @@ def main():
     if len(predictions_denorm) > 0:
         plot_evaluation(predictions_denorm, targets_denorm)
     else:
-        print("No predictions were generated. Is the test dataset empty or too short?")
+        print("No predictions were generated.")
 
 if __name__ == '__main__':
     main()

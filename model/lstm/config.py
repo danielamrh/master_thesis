@@ -14,13 +14,14 @@ DOWNSAMPLE_RATE = 5  # Use every 5th frame to reduce sequence length
 
 # -- MODEL HYPERPARAMETERS --
 INPUT_SIZE = 25    # 6 (acc) + 18 (ori as flattened 3x3) + 1 (uwb)
+# INPUT_SIZE = 13    # 6 (acc) + 6 (ori as flattened 3x3) + 1 (uwb)
 OUTPUT_SIZE = 6    # 3 (shoulder) + 3 (elbow) joint angles to predict
-HIDDEN_SIZE = 32   # Number of neurons in the LSTM hidden layer
+HIDDEN_SIZE = 64   # Number of neurons in the LSTM hidden layer
 NUM_LAYERS = 2     # Number of stacked LSTM layers
 DROPOUT = 0.1      # Dropout rate for regularization
 
 # -- TRAINING PARAMETERS --
-SEQUENCE_LENGTH = 50   # How many time steps to look back (50 frames * 5 downsample = 250 original frames)
+SEQUENCE_LENGTH = 100   # How many time steps to look back (100 frames * 5 downsample = 500 original frames = 5 seconds)
 BATCH_SIZE = 64        # Number of sequences per training batch
 LEARNING_RATE = 0.001  # Adam optimizer learning rate
 NUM_EPOCHS = 50        # Total number of training epochs
@@ -39,3 +40,7 @@ if TARGET_ARM == 'left':
 else: # right arm
     PELVIS_IDX, WRIST_IDX = 5, 1
     SHLDR_POSE_IDX, ELBOW_POSE_IDX = 16, 18
+
+# -- EVALUATION PLOTTING PARAMETERS --
+PLOT_WINDOW_START_FRAME = 1000  # Start plotting from this frame
+PLOT_WINDOW_END_FRAME = 1500    # Stop plotting at this frame (adjust as needed)
