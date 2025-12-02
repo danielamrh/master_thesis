@@ -3,7 +3,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-from ekf_joint_angle import EKFJointAngle # Make sure this is the new 4-state version
+from ekf_joint_angle import EKFJointAngle 
 
 from aitviewer.configuration import CONFIG as C
 from aitviewer.viewer import Viewer

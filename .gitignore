@@ -1,6 +1,8 @@
 /home/danielamrhein/master_thesis/data/
 /home/danielamrhein/master_thesis/initial_code_data_check/
-/home/danielamrhein/master_thesis/UIP_dataset//home/danielamrhein/master_thesis/initial_code_data_check/
 /home/danielamrhein/master_thesis/UIP_dataset/
-/home/danielamrhein/master_thesis/data/AMASS_raw/
-/home/danielamrhein/master_thesis/data/AMASS_raw
+data/AMASS_raw/
+data/AMASS_processed/
+data/smpl_models/
+data/smplh_models/
+data/smplx_models/

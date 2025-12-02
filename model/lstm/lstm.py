@@ -1,22 +1,23 @@
 import torch
 from torch import nn
-from config import *
+from config_amass import *
 
 
 class ArmPoseLSTM(nn.Module):
     """
-    A simple but effective LSTM model for sequence-to-sequence arm pose prediction.
+    LSTM model for sequence-to-sequence arm pose prediction.
     """
     def __init__(self):
         super(ArmPoseLSTM, self).__init__()
         
+        # Define the LSTM layer
         self.lstm = nn.LSTM(
-            input_size=INPUT_SIZE,
+            input_size=INPUT_SIZE, 
             hidden_size=HIDDEN_SIZE,
             num_layers=NUM_LAYERS,
-            batch_first=True, # This is crucial! (batch, seq_len, features)
+            batch_first=True, 
             dropout=DROPOUT if NUM_LAYERS > 1 else 0.0,
-            bidirectional=False # For real-time, we can't look into the future
+            bidirectional=False
         )
         
         # A fully connected layer to map the LSTM output to our desired pose dimension
@@ -34,11 +35,17 @@ class ArmPoseLSTM(nn.Module):
         # We only need the output for each time step
         # Shape: (batch_size, sequence_length, hidden_size)
         lstm_out, _ = self.lstm(x)
+
+        # Take only the output from the LAST time step
+        # last_time_step_out shape: (batch_size, hidden_size*2)
+        last_time_step_out = lstm_out[:, -1, :]
         
         # To get a prediction for each time step in the sequence,
         # we apply the linear layer to the entire sequence.
         # PyTorch's Linear layer automatically handles this batching.
         # Shape: (batch_size, sequence_length, output_size)
-        predictions = self.fc(lstm_out)
-        
+        linear_out = self.fc(last_time_step_out)
+
+        predictions = torch.tanh(linear_out)  # Constrain outputs to [-1, 1]
+
         return predictions

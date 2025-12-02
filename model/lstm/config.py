@@ -1,46 +1,71 @@
 import torch
 
 # -- PATHS --
-TRAIN_DATASET_PATH = "/home/danielamrhein/master_thesis/UIP_dataset/UIP_DB_Dataset/train.pt"
-TEST_DATASET_PATH = "/home/danielamrhein/master_thesis/UIP_dataset/UIP_DB_Dataset/test.pt"
-MODEL_SAVE_PATH = "arm_pose_model.pth"
+DRIVE_PROJECT_ROOT = "/content/drive/MyDrive/lstm"
+
+# AMASS Dataset
+TRAIN_DATASET_PATH_AMASS = f"/content/drive/MyDrive/preprocess/data/AMASS_processed_train"
+TEST_DATASET_PATH_AMASS = f"/content/drive/MyDrive/preprocess/data/AMASS_processed_test/test_split"
+
+# UIP-Dataset
+TRAIN_DATASET_PATH_UIP = f"{DRIVE_PROJECT_ROOT}/data/train.pt"
+TEST_DATASET_PATH_UIP = f"{DRIVE_PROJECT_ROOT}/data/test.pt"
+MODEL_SAVE_PATH_BASE = f"{DRIVE_PROJECT_ROOT}/model_checkpoints" 
 
 # -- COMPUTATION --
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # -- DATASET PARAMETERS --
-TARGET_ARM = 'left'  # 'left' or 'right'
-DOWNSAMPLE_RATE = 5  # Use every 5th frame to reduce sequence length
+TARGET_ARM = 'left'
+DOWNSAMPLE_RATE = 5
+SEQUENCE_LENGTH = 40 # Window size 
+STRIDE = 20          # Stride for sliding window
 
-# -- MODEL HYPERPARAMETERS --
-INPUT_SIZE = 25    # 6 (acc) + 18 (ori as flattened 3x3) + 1 (uwb)
-# INPUT_SIZE = 13    # 6 (acc) + 6 (ori as flattened 3x3) + 1 (uwb)
-OUTPUT_SIZE = 6    # 3 (shoulder) + 3 (elbow) joint angles to predict
-HIDDEN_SIZE = 64   # Number of neurons in the LSTM hidden layer
-NUM_LAYERS = 2     # Number of stacked LSTM layers
-DROPOUT = 0.1      # Dropout rate for regularization
+# --- Define the fixed split (assuming 22 sequences total in train.pt) ---
+TRAIN_SEQUENCE_INDICES = list(range(20))
+VAL_SEQUENCE_INDICES = [20, 21]
+
+# --- MODEL HYPERPARAMETERS --
+INPUT_SIZE = 25    # Using 25 features (acc, ori, uwb)
+OUTPUT_SIZE = 6    # Predicting 6 joint angles (shoulder + elbow)
+DROPOUT = 0.1      # Dropout rate 
+
+# --- LSTM HYPERPARAMETERS
+HIDDEN_SIZE = 128  # LSTM hidden state size
+NUM_LAYERS = 3     # Number of LSTM layers
+
+# --- TRANSFORMER PARAMETERS ---
+EMBED_DIM = 128               # Dimension of the model (must be divisible by NUM_HEADS)
+NUM_HEADS = 8                 # Number of self-attention heads
+NUM_TRANSFORMER_LAYERS = 6    # Number of Transformer encoder layers
 
 # -- TRAINING PARAMETERS --
-SEQUENCE_LENGTH = 100   # How many time steps to look back (100 frames * 5 downsample = 500 original frames = 5 seconds)
-BATCH_SIZE = 64        # Number of sequences per training batch
-LEARNING_RATE = 0.001  # Adam optimizer learning rate
-NUM_EPOCHS = 50        # Total number of training epochs
-
-# -- DATA KEYS AND INDICES --
-# Do not change these unless the dataset format changes
-ACC_KEY = 'acc'
-ORI_KEY = 'ori'
-UWB_KEY = 'vuwb'
-POSE_KEY = 'pose'
-
-# Based on UIP dataset structure
-if TARGET_ARM == 'left':
-    PELVIS_IDX, WRIST_IDX = 5, 0
-    SHLDR_POSE_IDX, ELBOW_POSE_IDX = 15, 17
-else: # right arm
-    PELVIS_IDX, WRIST_IDX = 5, 1
-    SHLDR_POSE_IDX, ELBOW_POSE_IDX = 16, 18
+BATCH_SIZE = 128      # Batch size for training and validation 
+# LEARNING_RATE = 1e-04 # Learning rate for optimizer LSTM
+LEARNING_RATE = 1e-05 # Learning rate for optimizer Transformer
+NUM_EPOCHS = 50       # Number of training epochs 
 
 # -- EVALUATION PLOTTING PARAMETERS --
-PLOT_WINDOW_START_FRAME = 1000  # Start plotting from this frame
-PLOT_WINDOW_END_FRAME = 1500    # Stop plotting at this frame (adjust as needed)
+PLOT_WINDOW_START_FRAME = 0
+PLOT_WINDOW_END_FRAME = 1000
+
+# -- DATA KEYS AND INDICES --
+ACC_KEY = 'acc'
+ORI_KEY = 'ori'
+UWB_KEY = 'vuwb'     
+POSE_KEY = 'pose'    
+
+REFERENCE_UPPER_ARM = 0.30
+REFERENCE_FOREARM = 0.27
+
+# --- Define indices for GT_JOINTS (SMPL layout) ---
+if TARGET_ARM == 'left':
+    PELVIS_IDX, WRIST_IDX = 5, 0        # IMU/UWB Sensor Indices
+    SHLDR_POSE_IDX, ELBOW_POSE_IDX = 16, 18 # SMPL Pose Vector Indices
+else: # right arm
+    PELVIS_IDX, WRIST_IDX = 5, 1
+    SHLDR_POSE_IDX, ELBOW_POSE_IDX = 17, 19
+
+# --- Evaluation Specific ---
+EVAL_EPOCH = NUM_EPOCHS
+
