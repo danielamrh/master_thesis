@@ -33,7 +33,7 @@ cd master_thesis
 
 Install dependencies:
 ```
-# pip install torch numpy matplotlib tqdm
+pip install torch numpy matplotlib tqdm
 ```
 
 ### 3. Data Setup
@@ -55,6 +55,6 @@ master_thesis/
 
 ## 📚 Citations and Acknowledgements
 
-[^1]: R. Armani, C. Qian, J. Jiang, and C. Holz, "Ultra Inertial Poser: Scalable Motion Capture and Tracking from Sparse Inertial Sensors and Ultra-Wideband Ranging," Apr. 2024. [Online]. Available: http://​arxiv.org​/​pdf/​2404.19541.
-[^2]: N. Mahmood, N. Ghorbani, N. F. Troje, G. Pons-Moll, and M. J. Black, "AMASS: Archive of Motion Capture as Surface Shapes," Apr. 2019. [Online]. Available: https://​arxiv.org​/​pdf/​1904.03278. 
-[^3]: M. Loper, N. Mahmood, J. Romero, G. Pons-Moll, and M. J. Black, "SMPL: a skinned multi-person linear model," ACM Trans. Graph., vol. 34, no. 6, pp. 1–16, 2015, doi: 10.1145/2816795.2818013.
+R. Armani, C. Qian, J. Jiang, and C. Holz, "Ultra Inertial Poser: Scalable Motion Capture and Tracking from Sparse Inertial Sensors and Ultra-Wideband Ranging," Apr. 2024. [Online]. Available: http://​arxiv.org​/​pdf/​2404.19541.
+N. Mahmood, N. Ghorbani, N. F. Troje, G. Pons-Moll, and M. J. Black, "AMASS: Archive of Motion Capture as Surface Shapes," Apr. 2019. [Online]. Available: https://​arxiv.org​/​pdf/​1904.03278. 
+M. Loper, N. Mahmood, J. Romero, G. Pons-Moll, and M. J. Black, "SMPL: a skinned multi-person linear model," ACM Trans. Graph., vol. 34, no. 6, pp. 1–16, 2015, doi: 10.1145/2816795.2818013.
