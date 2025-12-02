@@ -1,5 +1,6 @@
 # Master Thesis: Sparse Sensor IMU-UWB Fusion for Precise Upper Limb Motion Tracking
 ### Author: Daniel Amrhein
+Copyright (C) 2025 Daniel Amrhein
 
 This repository contains the implementation of a deep learning framework, utilizing Transformer and LSTM architectures, for accurate arm pose estimation. The model fuses inertial (IMU) and ultra-wideband (UWB) sensor data, primarily trained and evaluated on synthetic AMASS motion data and real-world UIP data.
 
