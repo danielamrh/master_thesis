@@ -42,7 +42,7 @@ pip install torch numpy matplotlib tqdm
 After downloading the external files (see "Important Note" above), ensure your local file structure matches the paths defined in config_amass.py.
 
 The required data structure is:
-
+```
 master_thesis/
 ├── data/
 │   ├── smplx_models/  <-- Contains SMPL/SMPLH/SMPLX files
@@ -53,9 +53,12 @@ master_thesis/
 │       ├── train.pt   <-- Downloaded UIP Training Data
 │       └── test.pt    <-- Downloaded UIP Test Data
 └── ...
+```
 
 ## 📚 Citations and Acknowledgements
 
 R. Armani, C. Qian, J. Jiang, and C. Holz, "Ultra Inertial Poser: Scalable Motion Capture and Tracking from Sparse Inertial Sensors and Ultra-Wideband Ranging," Apr. 2024. [Online]. Available: http://​arxiv.org​/​pdf/​2404.19541.
+
 N. Mahmood, N. Ghorbani, N. F. Troje, G. Pons-Moll, and M. J. Black, "AMASS: Archive of Motion Capture as Surface Shapes," Apr. 2019. [Online]. Available: https://​arxiv.org​/​pdf/​1904.03278. 
+
 M. Loper, N. Mahmood, J. Romero, G. Pons-Moll, and M. J. Black, "SMPL: a skinned multi-person linear model," ACM Trans. Graph., vol. 34, no. 6, pp. 1–16, 2015, doi: 10.1145/2816795.2818013.
